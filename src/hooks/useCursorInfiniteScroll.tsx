@@ -1,154 +1,121 @@
-import { useEffect, useRef, useCallback } from 'react';
-//import axios from 'axios';
+import { useInfiniteQuery, InfiniteData } from '@tanstack/react-query';
+import type { QueryFunctionContext } from '@tanstack/react-query';
+import { useInfiniteScrollTrigger } from '@/hooks/useInfiniteScrollTrigger';
 import instance from '@/api/axiosInstance';
-import { useSelector } from 'react-redux';
-import { RootState } from '@/redux/store';
-import { RegionOption, SortOption, SubRegionOption } from '@/types/reviewType';
+import { SortOption, RegionOption, SubRegionOption } from '@/types/reviewType';
 import { PlanDataWithCategory } from '@/types/plans';
-import { getCategoryId } from '@/utils/categoryUtils';
 
-const baseURL = process.env.NEXT_PUBLIC_BASE_URL;
+interface PlanListData {
+  planCount: number;
+  planList: PlanDataWithCategory[];
+  nextCursor: number | null;
+}
 
-interface UseCursorInfiniteScrollProps {
-  cursor: number | null | undefined;
-  setCursor: (cursor: number | null | undefined) => void;
-  isFetching: boolean;
-  setIsFetching: (fetching: boolean) => void;
-  selectedCategory: string | null;
+interface PlanListResponse {
+  success: boolean;
+  message: string;
+  data: PlanListData;
+}
+
+interface useCursorInfiniteScrollProps {
+  initialPlans: PlanDataWithCategory[];
+  initialCursor: number | null;
+  selectedCategory: string;
   selectedSubCategory: string | null;
   selectedRegion: RegionOption | null;
   selectedSubRegion: SubRegionOption | null;
   selectedSort: SortOption | null;
-  onDataFetched: (newData: PlanDataWithCategory[]) => void;
 }
 
 export const useCursorInfiniteScroll = ({
-  cursor,
-  setCursor,
-  isFetching,
-  setIsFetching,
+  initialPlans,
+  initialCursor,
   selectedCategory,
   selectedSubCategory,
+  selectedRegion,
+  selectedSubRegion,
   selectedSort,
-  onDataFetched,
-}: UseCursorInfiniteScrollProps) => {
-  const isLoggedIn = useSelector((state: RootState) => state.auth.isLoggedIn);
-  const loaderRef = useRef<HTMLDivElement | null>(null);
-  const observerRef = useRef<IntersectionObserver | null>(null);
+}: useCursorInfiniteScrollProps) => {
+  const fetchPlans = async ({
+    pageParam = initialCursor ?? 0,
+  }: QueryFunctionContext<
+    (string | SubRegionOption | null)[],
+    number | null
+  >): Promise<PlanListData> => {
+    const sortParam = selectedSort ? selectedSort.value : 'default';
+    const categoryParams = selectedCategory === '달램핏' ? 1 : 2;
+    const url = `/api/plans?cursor=${pageParam}&size=10&sort=${sortParam}&categoryId=${categoryParams}`;
 
-  // 요청한 cursor를 저장하여 중복 요청 방지
-  const requestedCursors = useRef(new Set<number | null | undefined>());
-
-  /**
-   * IntersectionObserver 콜백 함수
-   * - isFetching이 true이면 중복 요청 방지
-   * - requestedCursors를 이용해 이미 요청한 cursor인지 확인
-   */
-  const handleObserver = useCallback(
-    async (entries: IntersectionObserverEntry[]) => {
-      const target = entries[0];
-
-      if (target.isIntersecting && !isFetching && cursor !== null) {
-        // 이미 요청한 cursor인지 확인하여 중복 요청 방지
-        if (requestedCursors.current.has(cursor)) return;
-
-        setIsFetching(true);
-        requestedCursors.current.add(cursor); // 요청한 cursor 저장
-
+    try {
+      const response = await instance.get<PlanListResponse>(url);
+      return response.data.data;
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'response' in error &&
+        typeof error.response === 'object' &&
+        error.response !== null &&
+        'status' in error.response &&
+        error.response.status === 401 &&
+        'data' in error.response &&
+        typeof error.response.data === 'object' &&
+        error.response.data !== null &&
+        'message' in error.response.data &&
+        error.response.data.message === '만료된 토큰입니다.'
+      ) {
         try {
-          const categoryParam = getCategoryId(selectedCategory || '');
-          const sortParam = selectedSort ? `&sort=${selectedSort.value}` : '';
-          let url = `${baseURL}/api/plans?size=10&categoryId=${categoryParam}${sortParam}`;
-
-          if (cursor !== undefined) {
-            url += `&cursor=${cursor}`;
-          }
-
-          let res;
-          if (isLoggedIn) {
-            // 회원이면 쿠키 포함 요청
-            res = await instance.get(url);
-          } else {
-            // 비회원이면 쿠키 없이 요청
-            res = await instance.get(url, { withCredentials: false });
-          }
-
-          const newData = res.data;
-          const formatted = newData.data.planList as PlanDataWithCategory[];
-          onDataFetched(formatted);
-
-          if (newData.data.nextCursor === null || formatted.length === 0) {
-            setCursor(null);
-            if (observerRef.current) {
-              observerRef.current.disconnect();
-            }
-          } else {
-            setCursor(newData.data.nextCursor);
-          }
-        } catch (error) {
-          console.error('추가 데이터 로딩 실패:', error);
-        } finally {
-          setIsFetching(false);
+          const responseFallback = await instance.get<PlanListResponse>(url, {
+            withCredentials: false,
+          });
+          return responseFallback.data.data;
+        } catch (fallbackError: unknown) {
+          console.error('Fallback 요청 실패:', fallbackError);
+          return { planCount: 0, planList: [], nextCursor: null };
         }
       }
-    },
-    [
-      cursor,
-      isFetching,
-      selectedCategory,
-      selectedSort,
-      setCursor,
-      setIsFetching,
-      onDataFetched,
-      isLoggedIn,
-    ],
-  );
-
-  /**
-   * IntersectionObserver 등록 및 해제
-   */
-  useEffect(() => {
-    if (!selectedCategory) return;
-    if (cursor === null) {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-        observerRef.current = null;
-      }
-      return;
+      throw error;
     }
+  };
 
-    const observer = new IntersectionObserver(handleObserver, {
-      threshold: 0.1,
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage } =
+    useInfiniteQuery<
+      PlanListData,
+      Error,
+      InfiniteData<PlanListData>,
+      (string | SubRegionOption | null)[],
+      number
+    >({
+      queryKey: [
+        'plans',
+        selectedCategory,
+        selectedSubCategory,
+        selectedRegion,
+        selectedSubRegion,
+        selectedSort,
+      ],
+      queryFn: fetchPlans,
+      getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+      initialData: {
+        pages: [
+          {
+            planCount: initialPlans.length,
+            planList: initialPlans,
+            nextCursor: initialCursor,
+          },
+        ],
+        pageParams: [initialCursor ?? 0],
+      },
+      initialPageParam: initialCursor ?? 0,
     });
-    observerRef.current = observer;
-    if (loaderRef.current) {
-      observer.observe(loaderRef.current);
+
+  const plans = data?.pages?.flatMap((page) => page.planList) ?? [];
+
+  const { loaderRef } = useInfiniteScrollTrigger(() => {
+    if (hasNextPage && !isFetchingNextPage) {
+      fetchNextPage();
     }
+  });
 
-    return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-      }
-    };
-  }, [handleObserver, cursor, selectedCategory]);
-
-  /**
-   * 정렬 필터 변경 시 requestedCursors 초기화
-   */
-  useEffect(() => {
-    if (selectedSort) {
-      requestedCursors.current.clear();
-    }
-  }, [selectedSort]);
-
-  /**
-   * 카테고리 변경 시 requestedCursors 초기화
-   */
-  useEffect(() => {
-    if (selectedCategory || selectedSubCategory) {
-      requestedCursors.current.clear();
-    }
-  }, [selectedCategory, selectedSubCategory]);
-
-  return { loaderRef };
+  return { plans, loaderRef, isFetchingNextPage };
 };
